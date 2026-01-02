@@ -1,5 +1,6 @@
 import json
 import requests
+from requests.adapters import HTTPAdapter
 from bs4 import BeautifulSoup
 import re
 import os
@@ -16,6 +17,12 @@ from urllib.parse import urlparse, parse_qs
 class VBPLCrawler:
     def __init__(self, output_dir="crawled_docs"):
         self.session = requests.Session()
+        
+        # Increase connection pool size to handle concurrent threads (avoiding warnings)
+        adapter = HTTPAdapter(pool_connections=20, pool_maxsize=30)
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
+
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
@@ -211,6 +218,23 @@ class VBPLCrawler:
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
 
+    def process_single_url(self, url):
+        """Helper to process a single URL in a thread."""
+        try:
+            # Checkpoint: Check if file already exists
+            item_id = self.extract_item_id(url)
+            if item_id:
+                filename = f"{item_id}.json"
+                filepath = os.path.join(self.output_dir, filename)
+                if os.path.exists(filepath):
+                    return # Skip silently or with debug log to avoid clutter
+
+            logging.info(f"Crawling {url}")
+            data = self.get_document_data(url)
+            self.save_doc(data)
+        except Exception as e:
+            logging.error(f"Error processing {url}: {e}")
+
     def process_files(self, dieu_file, lienquan_file):
         """
         Reads URLs from the local JSON samples and crawls them.
@@ -240,20 +264,18 @@ class VBPLCrawler:
             except Exception as e:
                 logging.error(f"Error reading {lienquan_file}: {e}")
 
-        logging.info(f"Found {len(urls)} unique VBPL URLs to crawl.")
+        url_list = sorted(list(urls))
+        logging.info(f"Found {len(url_list)} unique VBPL URLs to crawl.")
         
-        for url in tqdm(urls, desc="Crawling documents"):
-            # Checkpoint: Check if file already exists
-            item_id = self.extract_item_id(url)
-            if item_id:
-                filename = f"{item_id}.json"
-                filepath = os.path.join(self.output_dir, filename)
-                if os.path.exists(filepath):
-                    logging.info(f"Skipping {url} (already exists)")
-                    continue
-
-            data = self.get_document_data(url)
-            self.save_doc(data)
+        import concurrent.futures
+        
+        # Parallel Execution
+        # Recommended: 10-20 workers for I/O bound tasks like this
+        max_workers = 20
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Use tqdm to wrap the iterator
+            list(tqdm(executor.map(self.process_single_url, url_list), total=len(url_list), desc="Crawling documents"))
 
 if __name__ == "__main__":
     crawler = VBPLCrawler()
