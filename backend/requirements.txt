@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+sqlmodel
+asyncpg
+psycopg2-binary
+qdrant-client
+sentence-transformers
+underthesea
+python-multipart
+requests
+beautifulsoup4
+pytest
+python-dotenv
+tqdm

@@ -1,67 +1,122 @@
-# Law Data Crawler
+# LawVina - Vietnamese Legal AI Assistant
 
-This project contains tools to crawl, parse, and structure Vietnamese legal data from the "Bộ Pháp điển" and "Văn bản pháp luật" (VBPL) sources.
+LawVina is an intelligent legal assistant capable of answering questions about Vietnamese law by retrieving information from the "Bộ Pháp điển" (Legal Code) and "Văn bản Quy phạm pháp luật" (Legal Documents). It uses a RAG (Retrieval-Augmented Generation) architecture powered by Qdrant (Vector DB), PostgreSQL (Relational DB), and local LLMs via Ollama.
 
-## Project Structure
+## 1. Prerequisites
 
-*   **`phapdien_crawler.py`**: The main script to parse local "Bộ Pháp điển" data.
-    *   Reads `jsonData.js` for structure (`jdChuDe`, `jdDeMuc`, `jdAllTree`).
-    *   Parses HTML files in `phap_dien/demuc/` to extract Chapters (`Chương`) and Articles (`Điều`).
-    *   Extracts legal references (`VBQPPL`) and related items (`LienQuan`).
-    *   Outputs: `phap_dien/Chuong.json`, `phap_dien/Dieu.json`, `phap_dien/LienQuan.json`.
-    *   **Features**: Progress bars (tqdm), checkpointing (every 10 files), and resume capability.
-*   **`document_crawler.py`**: A crawler for external legal documents referenced in the Phap Dien data.
-    *   Reads links from `phap_dien/Dieu.json` and `phap_dien/LienQuan.json`.
-    *   Crawls full text from `vbpl.vn`.
-    *   Parses structure based on the Table of Contents ("Mục lục văn bản").
-    *   Outputs: Individual JSON files in `crawled_docs/{ItemID}.json`.
-*   **`utils.py`**: Utility functions for Roman numeral conversion, HTML table parsing, and data extraction.
-*   **`main.py`**: (Deprecated) Predecessor to `phapdien_crawler.py`.
+Before starting, ensure you have the following installed:
+*   **Docker & Docker Compose**: For running PostgreSQL and Qdrant.
+*   **Python 3.10+**: For backend and crawlers.
+*   **Node.js & npm**: For the frontend.
+*   **Ollama**: For running the local AI model.
 
-## Setup
+## 2. Infrastructure Setup
 
-1.  **Environment**: Ensure you have Python installed.
-2.  **Dependencies**: Install required packages:
-    ```bash
-    pip install beautifulsoup4 requests tqdm
-    ```
-    *(Note: Using a virtual environment is recommended)*
+Start the database services (PostgreSQL and Qdrant):
+```bash
+docker-compose up -d
+```
+This will start:
+*   PostgreSQL on port `5432`
+*   Qdrant on port `6333`
 
-## Usage
+## 3. Data Pipeline
 
-### 1. Crawl Phap Dien Data
+To populate the system with legal data, follow these steps in order:
 
-This step processes the local HTML and JS files to build the core dataset.
-
+### Step 1: Crawl Phap Dien Structure
+This script crawls the hierarchical structure of the Vietnamese Legal Code (Bộ Pháp điển) and populates the `phapdien_nodes` table.
 ```bash
 python phapdien_crawler.py
 ```
 
-*   **Logs**: Check `phapdien_crawler.log` for detailed status and errors.
-*   **Checkpoints**: The script saves progress every 10 processed files. If interrupted, run it again to resume from the last checkpoint.
-
-### 2. Crawl External Documents
-
-After generating the Phap Dien data, use this script to fetch the full text of related legal documents.
-
+### Step 2: Crawl VBQPPL Documents
+This script downloads and parses the actual legal documents (VBQPPL) referenced in the code.
 ```bash
 python document_crawler.py
 ```
 
-*   **Logs**: Check `document_crawler.log` for crawling status.
-*   **Output**: JSON files will be saved in `crawled_docs/`.
+### Step 3: Ingest to Vector Database
+This step reads the crawled data from PostgreSQL, generates embeddings, and indexes them in Qdrant for semantic search.
+```bash
+cd backend
+python ingest.py
+cd ..
+```
 
-## Output Data Structure
+## 4. Backend Setup
 
-*   **`Dieu.json`**: Contains details of every Article (Điều).
-    *   `MAPC`: Unique Identifier.
-    *   `TEN`: Article Title.
-    *   `NoiDung`: Full text content.
-    *   `VBQPPL`: References to source legal documents.
-    *   `ChuongMAPC`: ID of the containing Chapter.
-*   **`LienQuan.json`**: Relationships between Articles and other documents/articles.
-    *   `source_MAPC`: The Article ID.
-    *   `target_MAPC`: The related Article ID.
-    *   `link`: External URL (if applicable).
-*   **`crawled_docs/`**: JSON files for full legal documents.
-    *   `sections`: List of sections corresponding to the TOC, with full text content.
+The backend is a FastAPI application that handles chat requests, retrieval, and LLM streaming.
+
+1.  **Navigate to backend directory**:
+    ```bash
+    cd backend
+    ```
+
+2.  **Create and activate virtual environment**:
+    ```bash
+    python -m venv .venv
+    source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+    ```
+
+3.  **Install dependencies**:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+4.  **Configure Environment**:
+    Create a `.env` file in the `backend/` directory with the following content:
+    ```env
+    DATABASE_URL=postgresql+asyncpg://lawbot:lawbot_secret@localhost:5432/law_database
+    QDRANT_HOST=localhost
+    OLLAMA_BASE_URL=http://localhost:11434
+    
+    # Optional: Use Gemini instead of Ollama
+    # GEMINI_API_KEY=your_gemini_api_key
+    ```
+    *Note: If `GEMINI_API_KEY` is not set, the system defaults to Ollama.*
+
+5.  **Run the Server**:
+    ```bash
+    python main.py
+    ```
+    The API will be available at `http://localhost:8000`.
+
+## 5. Frontend Setup
+
+The frontend is a modern React application built with Vite and Tailwind CSS.
+
+1.  **Navigate to frontend directory**:
+    ```bash
+    cd frontend
+    ```
+
+2.  **Install dependencies**:
+    ```bash
+    npm install
+    ```
+
+3.  **Run the Development Server**:
+    ```bash
+    npm run dev
+    ```
+    Access the application at `http://localhost:5173`.
+
+## 6. AI Model Setup (Ollama)
+
+This project is optimized for the `qwen3:4b` model (or similar reasoning models).
+
+1.  **Install Ollama**: Download from [ollama.com](https://ollama.com).
+2.  **Pull the Model**:
+    ```bash
+    ollama pull qwen3:4b
+    ```
+    *Note: You can change the model name in `backend/llm_service.py` or via environment variable `OLLAMA_MODEL` if implemented.*
+
+3.  **Run Ollama**: Ensure Ollama is running in the background (usually on port 11434).
+
+## Troubleshooting
+
+*   **Database connection errors**: Ensure Docker containers are running (`docker ps`).
+*   **Ollama connection refused**: Ensure Ollama is running and `OLLAMA_BASE_URL` is correct.
+*   **Frontend API errors**: Check if the backend is running on port 8000 and CORS is configured (enabled by default).
