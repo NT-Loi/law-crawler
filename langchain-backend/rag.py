@@ -27,20 +27,20 @@ class RAG:
         self.qdrant_client = QdrantClient(path=os.getenv("QDRANT_PATH"))
         logging.info(f"Initialize Qdrant client: {self.qdrant_client}")
         
-        model_name = os.getenv("EMBEDDING_MODEL")
-        model_kwargs = {"device": self.device}
-        encode_kwargs = {"normalize_embeddings": False}
-        self.embedding = HuggingFaceEmbeddings(
-            model_name=model_name,
-            model_kwargs=model_kwargs,
-            encode_kwargs=encode_kwargs,
-        )
-        logging.info(f"Initialize embedding: {self.embedding}")
+        embedding_name = os.getenv("EMBEDDING_MODEL")
+        model_kwargs = {"device": "cuda" if torch.cuda.is_available() else "cpu"}
+        encode_kwargs = {"convert_to_numpy": True, 
+                        "normalize_embeddings": False}
+        self.embedding = HuggingFaceEmbeddings(model_name=embedding_name, 
+                                                model_kwargs=model_kwargs, 
+                                                encode_kwargs=encode_kwargs)
+        self.embedding._client.max_seq_length = 2048
+        logging.info(f"Initialize embedding: {embedding_name}")
         
         self.sparse_embedding = SparseTextEmbedding(model_name="Qdrant/bm25")
         logging.info(f"Initialize sparse embedding: {self.sparse_embedding}")
         
-        self.pd_collection_name = get_collection_name("phapdien", model_name)
+        self.pd_collection_name = get_collection_name("phapdien", embedding_name)
 
         rerank_model_name = os.getenv("RERANKING_MODEL")
         self.rerank_tokenizer = AutoTokenizer.from_pretrained(rerank_model_name)

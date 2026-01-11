@@ -24,10 +24,13 @@ def get_collection_name(source: str, model_name: str) -> str:
     """Generates a collection name based on source and model."""
     return f"{source}_{slugify_model_name(model_name)}"
 
+batch_size = 128
 model_name = os.getenv("EMBEDDING_MODEL")
 model_kwargs = {"device": "cuda" if torch.cuda.is_available() else "cpu"}
-encode_kwargs = {"normalize_embeddings": False}
+encode_kwargs = {"convert_to_numpy": True, 
+                "normalize_embeddings": False}
 embedding = HuggingFaceEmbeddings(model_name=model_name, model_kwargs=model_kwargs, encode_kwargs=encode_kwargs)
+embedding._client.max_seq_length = 2048
 sparse_embedding = SparseTextEmbedding(model_name="Qdrant/bm25")
 
 client = QdrantClient(path="./qdrant_data")
@@ -52,8 +55,6 @@ with open(os.getenv("PHAPDIEN_DIR") + "/Dieu.json", "r", encoding="utf-8") as f:
     data = json.load(f)
 
 points = []
-
-batch_size = 256
 for i in tqdm(range(0, len(data), batch_size), desc="Indexing Phap Dien"):
     batch_data = data[i:i + batch_size]
     batch_texts = [f"{item['TEN']} {item['NoiDung']}" for item in batch_data]
@@ -78,11 +79,12 @@ for i in tqdm(range(0, len(data), batch_size), desc="Indexing Phap Dien"):
                 }
             )
         )
+        if len(points) >= batch_size:
+            client.upsert(collection_name=pd_collection, points=points)
+            points.clear()
 
-client.upsert(
-    collection_name=pd_collection,
-    points=points
-)
+if points:
+    client.upsert(collection_name=pd_collection, points=points)
 
 print("Indexed Phap Dien nodes into", pd_collection)
 client.close()
