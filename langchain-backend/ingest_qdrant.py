@@ -24,16 +24,17 @@ def get_collection_name(source: str, model_name: str) -> str:
     """Generates a collection name based on source and model."""
     return f"{source}_{slugify_model_name(model_name)}"
 
-batch_size = 128
+batch_size = 256
 model_name = os.getenv("EMBEDDING_MODEL")
 model_kwargs = {"device": "cuda" if torch.cuda.is_available() else "cpu"}
 encode_kwargs = {"convert_to_numpy": True, 
-                "normalize_embeddings": False}
+                "normalize_embeddings": True}
 embedding = HuggingFaceEmbeddings(model_name=model_name, model_kwargs=model_kwargs, encode_kwargs=encode_kwargs)
-embedding._client.max_seq_length = 2048
+embedding._client.max_seq_length = int(os.getenv("MAX_SEQ_LENGTH"))
 sparse_embedding = SparseTextEmbedding(model_name="Qdrant/bm25")
 
-client = QdrantClient(path="./qdrant_data")
+# client = QdrantClient(path="./qdrant_data")
+client = QdrantClient(host=os.getenv("QDRANT_HOST"), port=os.getenv("QDRANT_PORT"))
 pd_collection = get_collection_name("phapdien", model_name)
 # vb_collection = f"vbqppl_nodes_{embedding_name}"
 vector_size = os.getenv("VECTOR_SIZE")
@@ -57,7 +58,7 @@ with open(os.getenv("PHAPDIEN_DIR") + "/Dieu.json", "r", encoding="utf-8") as f:
 points = []
 for i in tqdm(range(0, len(data), batch_size), desc="Indexing Phap Dien"):
     batch_data = data[i:i + batch_size]
-    batch_texts = [f"{item['TEN']} {item['NoiDung']}" for item in batch_data]
+    batch_texts = [f"{item['TEN']}\n{item['NoiDung']}" for item in batch_data]
     batch_dense_vectors = embedding.embed_documents(batch_texts)
     batch_sparse_vectors = sparse_embedding.embed(batch_texts)
     
@@ -75,7 +76,7 @@ for i in tqdm(range(0, len(data), batch_size), desc="Indexing Phap Dien"):
                 payload={
                     "id": item["ID"],
                     "source": "phapdien",
-                    "content": f"{item['TEN']} {item['NoiDung']}"
+                    "content": f"{item['TEN']}\n{item['NoiDung']}"
                 }
             )
         )

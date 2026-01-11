@@ -24,17 +24,18 @@ class RAG:
         # self.model = init_chat_model("google_genai:gemini-2.0-flash")
         # logging.info(f"Initialize LLM: {self.model}")
         
-        self.qdrant_client = QdrantClient(path=os.getenv("QDRANT_PATH"))
+        # self.qdrant_client = QdrantClient(path=os.getenv("QDRANT_PATH"))
+        self.qdrant_client = QdrantClient(host=os.getenv("QDRANT_HOST"), port=os.getenv("QDRANT_PORT"))
         logging.info(f"Initialize Qdrant client: {self.qdrant_client}")
         
         embedding_name = os.getenv("EMBEDDING_MODEL")
         model_kwargs = {"device": "cuda" if torch.cuda.is_available() else "cpu"}
         encode_kwargs = {"convert_to_numpy": True, 
-                        "normalize_embeddings": False}
+                        "normalize_embeddings": True}
         self.embedding = HuggingFaceEmbeddings(model_name=embedding_name, 
                                                 model_kwargs=model_kwargs, 
                                                 encode_kwargs=encode_kwargs)
-        self.embedding._client.max_seq_length = 2048
+        self.embedding._client.max_seq_length = int(os.getenv("MAX_SEQ_LENGTH"))
         logging.info(f"Initialize embedding: {embedding_name}")
         
         self.sparse_embedding = SparseTextEmbedding(model_name="Qdrant/bm25")
