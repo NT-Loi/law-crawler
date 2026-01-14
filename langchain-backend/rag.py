@@ -20,9 +20,6 @@ class RAG:
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         logging.info(f"Device: {self.device}")
-
-        # self.model = init_chat_model("google_genai:gemini-2.0-flash")
-        # logging.info(f"Initialize LLM: {self.model}")
         
         # self.qdrant_client = QdrantClient(path=os.getenv("QDRANT_PATH"))
         self.qdrant_client = QdrantClient(host=os.getenv("QDRANT_HOST"), port=os.getenv("QDRANT_PORT"))
@@ -65,7 +62,7 @@ class RAG:
                 Prefetch(query=sparse_vec, using="sparse", limit=top_k * 20)
             ],
             query=FusionQuery(fusion=Fusion.RRF),
-            limit=top_k * 10 # Retrieve more for reranking
+            limit=top_k # Retrieve more for reranking
         ).points
 
         sources = []
@@ -76,7 +73,8 @@ class RAG:
                     
             sources.append({"id": source_id, "content": content})
         
-        return self.rerank(query, sources, top_k=top_k)
+        # return self.rerank(query, sources, top_k=top_k)
+        return sources
 
     def rerank(self, query: str, sources: list[dict[str, Any]], top_k: int = 5) -> list[dict[str, Any]]:
         logging.info(f"Rerank documents for query: {query}")
