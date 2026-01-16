@@ -4,9 +4,12 @@ from fastapi.responses import StreamingResponse
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 from contextlib import asynccontextmanager
 import logging
+from typing import List, Optional
+from pydantic import BaseModel
+import re
 import json
 
-from chat import ChatRequest, ChatRouter, LegalRAGChain, WebLawChain, ChitChatChain, HybridChain, ChatMode
+from chat import ChatRouter, LegalRAGChain, WebLawChain, ChitChatChain, HybridChain, ChatMode
 from rag import RAG
 
 logging.basicConfig(level=logging.INFO)
@@ -67,12 +70,22 @@ app.add_middleware(
 async def root():
     return {"status": "ok", "message": "Law RAG API is ready"}
 
+class ChatRequest(BaseModel):
+    message: str
+    history: Optional[List[dict]] = []
+    mode: ChatMode = ChatMode.AUTO 
+    stream: bool = True # Flag to control streaming vs full response
+
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
+    if not rag_engine:
+        raise HTTPException(status_code=503, detail="RAG Engine not ready")
+
     try:
-        # 1. BƯỚC 1: PHÂN LOẠI Ý ĐỊNH (LEGAL vs NON_LEGAL)
-        # Luôn luôn phân loại trước để xử lý các câu chào hỏi xã giao
-        intent = await router.route(request.message, request.history)
+        # 1. BƯỚC 1: ROUTING (CHỈ KHI MODE LÀ AUTO)
+        intent = "LEGAL"
+        if request.mode == ChatMode.AUTO:
+            intent = await router.route(request.message, request.history)
         logging.info(f"Query: {request.message} | Intent Detected: {intent} | User Mode: {request.mode}")
 
         engine = None
@@ -98,11 +111,38 @@ async def chat_endpoint(request: ChatRequest):
                 # Mặc định của AUTO là dùng kho văn bản (RAG)
                 engine = legal_rag_chain
 
-        # 3. STREAM RESPONSE
-        return StreamingResponse(
-            engine.chat(request.message, request.history, rag_engine),
-            media_type="application/x-ndjson"
-        )
+        # 3. STREAM OR FULL RESPONSE
+        if request.stream:
+            return StreamingResponse(
+                engine.chat(request.message, request.history, rag_engine),
+                media_type="application/x-ndjson"
+            )
+        else:
+            # Collect full response
+            full_content = ""
+            used_docs = []
+            
+            async for chunk in engine.chat(request.message, request.history, rag_engine):
+                try:
+                    data = json.loads(chunk)
+                    if data['type'] == 'content':
+                         if 'delta' in data:
+                             full_content += data['delta']
+                    elif data['type'] == 'used_docs':
+                         if 'data' in data:
+                             used_docs = data['data']
+                         elif 'ids' in data:
+                             used_docs = [{"id": i} for i in data['ids']]
+                except:
+                    continue
+            
+            # Remove <think> tags if present in non-streaming mode too
+            full_content = re.sub(r'<think>.*?</think>', '', full_content, flags=re.DOTALL).strip()
+
+            return {
+                "response": full_content,
+                "used_docs": used_docs
+            }
 
     except Exception as e:
         logging.error(f"Error in chat endpoint: {str(e)}")
@@ -130,26 +170,37 @@ async def get_document(doc_id: str):
             )
             return res[0] if res else None
 
-        # Try searching in both collections
-        point = get_point_by_id(rag_engine.vb_collection_name, doc_id)
-        if not point:
+        # Detect source collection based on ID pattern:
+        # - IDs with hyphen (-) are from phapdien
+        # - IDs without hyphen are from vbqppl
+        if '-' in doc_id:
+            # Try phapdien first, then vbqppl as fallback
             point = get_point_by_id(rag_engine.pd_collection_name, doc_id)
+            if not point:
+                point = get_point_by_id(rag_engine.vb_collection_name, doc_id)
+        else:
+            # Try vbqppl first, then phapdien as fallback
+            point = get_point_by_id(rag_engine.vb_collection_name, doc_id)
+            if not point:
+                point = get_point_by_id(rag_engine.pd_collection_name, doc_id)
         
         if not point:
              raise HTTPException(status_code=404, detail="Document not found")
 
         payload = point.payload
+        source = payload.get("source", "phapdien" if '-' in doc_id else "vbqppl")
+        
         return {
             "metadata": {
                 "id": doc_id,
                 "title": payload.get("title", "Unknown"),
                 "url": payload.get("url", "#"),
-                "source": payload.get("source", "unknown")
+                "source": source
             },
             "content": [{
                 "type": "text",
-                "title": payload.get("hierarchy_path", ""),
-                "text": payload.get("content", "")
+                "title": f"{payload.get('title', '')}\n{payload.get('hierarchy_path', '')}",
+                "content": payload.get("content", "")
             }]
         }
 

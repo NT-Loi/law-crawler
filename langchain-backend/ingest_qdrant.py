@@ -11,7 +11,7 @@ from tqdm import tqdm
 import json
 import torch
 import re
-
+import hashlib
 load_dotenv()
 
 def slugify_model_name(model_name: str) -> str:
@@ -23,6 +23,21 @@ def slugify_model_name(model_name: str) -> str:
 def get_collection_name(source: str, model_name: str) -> str:
     """Generates a collection name based on source and model."""
     return f"{source}_{slugify_model_name(model_name)}"
+
+def get_point_id(doc_id: str, hierarchy_path: str) -> str:
+    """
+    Tạo ID duy nhất (MD5 Hash) cho point dựa trên ID văn bản và vị trí điều khoản.
+    Output ví dụ: 'a1b2c3d4e5f6...' (32 ký tự, an toàn cho URL/Frontend key)
+    """
+    # Xử lý trường hợp null
+    safe_doc_id = str(doc_id) if doc_id else "unknown_doc"
+    safe_path = str(hierarchy_path) if hierarchy_path else "general"
+
+    # Tạo chuỗi kết hợp (Raw String)
+    raw_combination = f"{safe_doc_id}_{safe_path}"
+
+    # Hash MD5 để tạo chuỗi ID cố định, không trùng lặp và an toàn
+    return hashlib.md5(raw_combination.encode('utf-8')).hexdigest()
 
 batch_size = 128
 model_name = os.getenv("EMBEDDING_MODEL")
@@ -144,7 +159,8 @@ for item in tqdm(data, desc="Indexing VBQPPL"):
                             }
                         },
                         payload={
-                            "id": meta["id"],
+                            "id": get_point_id(meta["id"], meta.get("hierarchy_path", "")),
+                            "doc_id": meta["id"],   
                             "url": meta.get("url", ""),
                             "source": "vbqppl",
                             "title": meta.get("title", ""),
@@ -177,7 +193,8 @@ if batch_texts:
                     }
                 },
                 payload={
-                    "id": meta["id"],
+                    "id": get_point_id(meta["id"], meta.get("hierarchy_path", "")),
+                    "doc_id": meta["id"],
                     "url": meta.get("url", ""),
                     "source": "vbqppl",
                     "title": meta.get("title", ""),

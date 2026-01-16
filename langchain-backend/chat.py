@@ -18,7 +18,8 @@ from prompts import (
     ANSWER_SYSTEM_PROMPT, ANSWER_USER_PROMPT,
     CHIT_CHAT_SYSTEM_PROMPT,
     EXPANSION_SYSTEM_PROMPT, EXPANSION_USER_PROMPT,
-    HYBRID_SYSTEM_PROMPT, HYBRID_USER_PROMPT
+    HYBRID_SYSTEM_PROMPT, HYBRID_USER_PROMPT,
+    WEB_SEARCH_SYSTEM_PROMPT, WEB_SEARCH_USER_PROMPT
 )
 
 load_dotenv()
@@ -34,27 +35,29 @@ RERANK_THRESHOLD = 0.75
 def format_law_docs_for_prompt(docs):
     blocks = []
     for d in docs:
-        doc_id = d.get('id', '')
+        id = d.get('id', '')
         source = d.get('source', '')
         title = d.get('title', '')
         content = d.get('content', '')
         hierarchy_path = d.get('hierarchy_path', '')
         
+        # Thêm dòng phân cách (---) để tách ID khỏi nội dung ngữ nghĩa
         if source == 'vbqppl':
-            display_id = d.get('original_doc_id', doc_id) 
-            
+            doc_id = d.get('doc_id', '')
             blocks.append(f"""
-                [DOC_ID: {doc_id} | Nguồn: Văn bản quy phạm pháp luật]
-                Tiêu đề: {display_id} {title}
-                Đường dẫn: {hierarchy_path}
-                Nội dung: {content}
-                """)
+            [INTERNAL_ID: {id}]
+            TÊN_VĂN_BẢN: Văn bản {doc_id} {title}
+            ĐƯỜNG_DẪN: {hierarchy_path}
+            NỘI_DUNG: {content}
+            --------------------
+            """)
         else:
             blocks.append(f"""
-                [DOC_ID: {doc_id} | Nguồn: Pháp điển]
-                Tiêu đề: {title}
-                Nội dung: {content}
-                """)
+            [INTERNAL_ID: {id}]
+            TÊN_VĂN_BẢN: {title}
+            NỘI_DUNG: {content}
+            --------------------
+            """)
             
     return "\n".join(blocks)
 
@@ -143,7 +146,7 @@ class WebSearchEngine:
             logging.warning("TAVILY_API_KEY not found in .env")
         self.client = TavilyClient(api_key=api_key)
 
-    def search(self, query: str, top_k=5) -> List[dict]:
+    def search(self, query: str, top_k=50) -> List[dict]:
         """
         Thực hiện search qua Tavily API.
         """
@@ -185,7 +188,90 @@ class WebSearchEngine:
             # Fallback an toàn: Trả về list rỗng để chain không bị crash
             return []
 
-# --- Chains ---
+# --- Helper Logic for Streaming with Citations ---
+async def stream_with_citations(llm, messages, rag_engine=None):
+    """
+    Handles streaming response from LLM, parsing <USED_DOCS> tags 
+    to separate content from citations.
+    """
+    buffer = ""
+    inside_tag = False
+    
+    async for chunk in llm.astream(messages):
+        content = chunk.content
+        if not content:
+            continue
+        
+        buffer += content
+        
+        # Check for start of tag
+        if "<USED_DOCS>" in buffer:
+            main_text, remaining = buffer.split("<USED_DOCS>", 1)
+            
+            if main_text:
+                yield json.dumps({"type": "content", "delta": main_text}, ensure_ascii=False) + "\n"
+            
+            buffer = remaining
+            inside_tag = True
+            
+        elif inside_tag:
+            # Inside tag, just accumulate buffer
+            pass
+            
+        else:
+            # Normal text handling with safety check for tag start
+            if "<" in buffer:
+                last_open = buffer.rfind("<")
+                potential_tag = buffer[last_open:]
+                target = "<USED_DOCS>"
+                
+                if target.startswith(potential_tag):
+                    # Potential partial tag, yield everything before it
+                    to_yield = buffer[:last_open]
+                    if to_yield:
+                        yield json.dumps({"type": "content", "delta": to_yield}, ensure_ascii=False) + "\n"
+                    buffer = potential_tag # Keep partial tag in buffer
+                else:
+                    # Not our tag, yield all
+                    yield json.dumps({"type": "content", "delta": buffer}, ensure_ascii=False) + "\n"
+                    buffer = ""
+            else:
+                yield json.dumps({"type": "content", "delta": buffer}, ensure_ascii=False) + "\n"
+                buffer = ""
+
+    # End of stream processing
+    used_ids = []
+    if inside_tag or "<USED_DOCS>" in buffer:
+        current_buffer = buffer
+        # If we caught the tag start but loop finished
+        if "<USED_DOCS>" in current_buffer and not inside_tag:
+             _, current_buffer = current_buffer.split("<USED_DOCS>", 1)
+        
+        # Handle tag closing
+        if "</USED_DOCS>" in current_buffer:
+            ids_str = current_buffer.split("</USED_DOCS>")[0]
+        else:
+            ids_str = current_buffer 
+            
+        clean_ids_str = ids_str.replace(">", "")
+        used_ids = [id.strip() for id in clean_ids_str.split(",") if id.strip()]
+    else:
+        # Flush remaining buffer as text if no tag found
+        if buffer:
+             yield json.dumps({"type": "content", "delta": buffer}, ensure_ascii=False) + "\n"
+
+    # Send used_docs event
+    # Send used_docs event
+    if used_ids:
+        if rag_engine:
+             # Load full details from Qdrant
+             rich_docs = await asyncio.to_thread(rag_engine.get_documents_by_ids, used_ids)
+             yield json.dumps({"type": "used_docs", "data": rich_docs}, ensure_ascii=False) + "\n"
+        else:
+             yield json.dumps({"type": "used_docs", "ids": used_ids}, ensure_ascii=False) + "\n"
+
+    logging.info(f"Final Used references: {used_ids}")
+
 class LegalRAGChain:
     def __init__(self):
         # Model cho Selection (Low Temp)
@@ -234,8 +320,8 @@ class LegalRAGChain:
             expanded_query = message
 
         # --- BƯỚC 1: RETRIEVAL ---
-        # Lấy top_k lớn (ví dụ 10) để có không gian cho LLM lọc nếu cần
-        raw_docs = rag_engine.retrieve(expanded_query, top_k=10)
+        # Lấy top_k lớn
+        raw_docs = rag_engine.retrieve(expanded_query, top_k=50)
         
         if not raw_docs:
              yield json.dumps({"type": "error", "content": "Không tìm thấy văn bản liên quan."}, ensure_ascii=False) + "\n"
@@ -244,19 +330,19 @@ class LegalRAGChain:
         # --- BƯỚC 2: KIỂM TRA ĐỘ TIN CẬY (LOGIC MỚI) ---
         
         # Kiểm tra điểm của văn bản đầu tiên (văn bản khớp nhất)
-        top_score = raw_docs[0].get("score", 0)
+        top_score = raw_docs[0].get("rerank_score", 0)
         filtered_docs = []
         skip_llm_filter = False
-
+        top_k = 5
         if top_score > RERANK_THRESHOLD:
             logging.info(f"High Confidence ({top_score:.4f} > {RERANK_THRESHOLD}). Skipping LLM Selection.")
             
             # Logic: Lấy tất cả các docs có điểm > threshold
-            # (Hoặc lấy top 5 nếu tất cả đều cao để tránh quá tải context)
+            # (Hoặc lấy top_k nếu tất cả đều cao để tránh quá tải context)
             filtered_docs = [d for d in raw_docs if d.get("rerank_score", 0) > RERANK_THRESHOLD]
             
-            # Nếu list quá dài, cắt bớt về top 5 để tập trung
-            filtered_docs = filtered_docs[:5]
+            # Nếu list quá dài, cắt bớt về top_k để tập trung
+            filtered_docs = filtered_docs[:top_k]
             
             skip_llm_filter = True
             
@@ -268,7 +354,11 @@ class LegalRAGChain:
         
         if not skip_llm_filter:
             # === CHẠY LLM FILTER (Logic cũ) ===
-            docs_text_block = format_law_docs_for_prompt(raw_docs)
+            # Giới hạn số lượng docs đưa vào LLM để tránh lỗi max_tokens (Context overflow)
+            # Lấy top k docs có điểm rerank cao nhất để nhờ LLM lọc
+            docs_for_selection = raw_docs[:top_k]
+            
+            docs_text_block = format_law_docs_for_prompt(docs_for_selection)
             select_messages = [
                 SystemMessage(content=SELECT_SYSTEM_PROMPT.format(docs_text=docs_text_block)),
                 HumanMessage(content=SELECT_USER_PROMPT.format(question=message))
@@ -280,11 +370,11 @@ class LegalRAGChain:
                 if selected_ids:
                     filtered_docs = [d for d in raw_docs if d['id'] in selected_ids]
                 else:
-                    # Fallback: Nếu LLM lọc ra rỗng nhưng Rerank có kết quả, lấy tạm top 1-2
-                    filtered_docs = raw_docs[:2]
+                    # Fallback: Nếu LLM lọc ra rỗng nhưng Rerank có kết quả, lấy tạm top k
+                    filtered_docs = raw_docs[:top_k]
             except Exception as e:
                 logging.error(f"LLM Filter Error: {e}")
-                filtered_docs = raw_docs[:3] # Fallback an toàn
+                filtered_docs = raw_docs[:top_k] # Fallback an toàn
 
         # Trả về Client danh sách nguồn đã chốt
         yield json.dumps({"type": "sources", "data": filtered_docs}, ensure_ascii=False) + "\n"
@@ -307,80 +397,10 @@ class LegalRAGChain:
             SystemMessage(content=ANSWER_SYSTEM_PROMPT.format(context=final_context))
         ] + chat_history_msgs + [HumanMessage(content=ANSWER_USER_PROMPT.format(question=message))]
 
-        # Buffer để chứa các mảnh text đang chờ xử lý (tránh in thẻ <USED_DOCS> ra màn hình)
-        buffer = ""
-        inside_tag = False
-        
-        async for chunk in self.answer_llm.astream(answer_messages):
-            content = chunk.content
-            if not content:
-                continue
-            
-            buffer += content
-            
-            # Kiểm tra xem thẻ mở <USED_DOCS> có bắt đầu xuất hiện không
-            if "<USED_DOCS>" in buffer:
-                # Tách phần nội dung trả lời và phần ID
-                main_text, remaining = buffer.split("<USED_DOCS>", 1)
-                
-                # 1. Đẩy nốt phần text còn lại cho client
-                if main_text:
-                    yield json.dumps({"type": "content", "delta": main_text}, ensure_ascii=False) + "\n"
-                
-                # 2. Chuyển sang chế độ xử lý ID (không in ra content nữa)
-                buffer = remaining # buffer giờ chỉ chứa nội dung trong thẻ
-                inside_tag = True
-                
-            elif inside_tag:
-                # Đang ở trong thẻ, chỉ gom buffer để parse sau, không yield content
-                pass
-                
-            else:
-                # Logic buffer an toàn: Chỉ yield khi chắc chắn không phải là một phần của thẻ <USED_DOCS>
-                # Ví dụ: buffer = "Xin chào <US" -> Chưa yield vội, đợi chunk sau ghép vào
-                # Cách đơn giản: Yield tất cả trừ phần cuối nếu nó giống thẻ mở
-                
-                # Để đơn giản hóa cho demo: Ta yield luôn nếu chưa thấy dấu hiệu thẻ
-                # (Trong môi trường production cần logic "Sliding Window" kỹ hơn)
-                if "<" in buffer:
-                    # Có thể là bắt đầu thẻ, giữ lại xử lý sau
-                    pass 
-                else:
-                    yield json.dumps({"type": "content", "delta": buffer}, ensure_ascii=False) + "\n"
-                    buffer = ""
+        # Use shared streaming logic
+        async for chunk in stream_with_citations(self.answer_llm, answer_messages, rag_engine=rag_engine):
+            yield chunk
 
-        # --- KẾT THÚC STREAM ---
-        # Lúc này buffer chứa nội dung trong thẻ (id1, id2...</USED_DOCS>) hoặc text còn dư
-        
-        used_ids = []
-        if inside_tag or "<USED_DOCS>" in buffer:
-            # Xử lý nội dung trong thẻ (đã tách phần đầu <USED_DOCS> nếu inside_tag=True)
-            # Nếu chưa tách (trường hợp thẻ nằm trọn trong chunk cuối), strip nó đi
-            current_buffer = buffer
-            if "<USED_DOCS>" in current_buffer and not inside_tag:
-                 _, current_buffer = current_buffer.split("<USED_DOCS>", 1)
-            
-            # Cắt đúng tại thẻ đóng </USED_DOCS>
-            if "</USED_DOCS>" in current_buffer:
-                ids_str = current_buffer.split("</USED_DOCS>")[0]
-            else:
-                ids_str = current_buffer # Trường hợp model dừng giữa chừng
-                
-            # Clean các ký tự còn sót (ví dụ > nếu model output lỗi)
-            clean_ids_str = ids_str.replace(">", "")
-            
-            # Tách ID
-            used_ids = [id.strip() for id in clean_ids_str.split(",") if id.strip()]
-        else:
-            # Trường hợp buffer còn sót text thường (LLM quên output thẻ)
-            if buffer:
-                 yield json.dumps({"type": "content", "delta": buffer}, ensure_ascii=False) + "\n"
-
-        # Gửi sự kiện riêng chứa list ID đã dùng cho Frontend highlight
-        if used_ids:
-             yield json.dumps({"type": "used_docs", "ids": used_ids}, ensure_ascii=False) + "\n"
-
-        logging.info(f"Used references: {used_ids}")
 
 class WebLawChain:
     def __init__(self):
@@ -392,7 +412,7 @@ class WebLawChain:
 
     async def chat(self, message, history, rag_engine):
         # Chạy search trong thread pool để không block server
-        web_results = await asyncio.to_thread(self.web_engine.search, message, top_k=5)
+        web_results = await asyncio.to_thread(self.web_engine.search, message, top_k=50)
         
         yield json.dumps({"type": "sources", "data": web_results}, ensure_ascii=False) + "\n"
         
@@ -402,17 +422,15 @@ class WebLawChain:
         
         # 2. Return Sources
         yield json.dumps({"type": "sources", "data": web_results}, ensure_ascii=False) + "\n"
-        
+        logging.info('Web Results: ', web_results)
         # 3. Answer
-        context = format_law_docs_for_prompt(web_results) # Tái sử dụng hàm format
         messages = [
-            SystemMessage(content=f"Bạn là trợ lý tra cứu tin tức pháp luật. Trả lời dựa trên context sau:\n{context}"),
-            HumanMessage(content=message)
+            SystemMessage(content=WEB_SEARCH_SYSTEM_PROMPT.format(web_results=json.dumps(web_results, ensure_ascii=False, indent=2))),
+            HumanMessage(content=WEB_SEARCH_USER_PROMPT.format(question=message))
         ]
         
-        async for chunk in self.llm.astream(messages):
-            if chunk.content:
-                yield json.dumps({"type": "content", "delta": chunk.content}, ensure_ascii=False) + "\n"
+        async for chunk in stream_with_citations(self.llm, messages):
+            yield chunk
 
 # 3. HybridChain (MỚI: Xử lý cả 2)
 class HybridChain:
@@ -430,8 +448,8 @@ class HybridChain:
         # Vì rag_engine.retrieve hiện tại là sync code (nếu chưa sửa thành async), 
         # ta cũng wrap nó vào to_thread cho chắc chắn
         
-        rag_task = asyncio.to_thread(rag_engine.retrieve, message, top_k=5)
-        web_task = asyncio.to_thread(self.web_engine.search, message, top_k=3)
+        rag_task = asyncio.to_thread(rag_engine.retrieve, message, top_k=50)
+        web_task = asyncio.to_thread(self.web_engine.search, message, top_k=50)
 
         rag_docs, web_docs = await asyncio.gather(rag_task, web_task)
 
@@ -459,15 +477,15 @@ class HybridChain:
             """)
         full_context = "\n".join(context_blocks)
 
-        # --- BƯỚC 4: ANSWERING ---
+        # --- BƯỚC 4: ANSWERING WITH CITATIONS ---
         messages = [
             SystemMessage(content=HYBRID_SYSTEM_PROMPT.format(context=full_context)),
             HumanMessage(content=HYBRID_USER_PROMPT.format(question=message))
         ]
 
-        async for chunk in self.llm.astream(messages):
-            if chunk.content:
-                yield json.dumps({"type": "content", "delta": chunk.content}, ensure_ascii=False) + "\n"
+        # Use shared streaming logic
+        async for chunk in stream_with_citations(self.llm, messages, rag_engine=rag_engine):
+            yield chunk
 
 class ChitChatChain:
     def __init__(self):

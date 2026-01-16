@@ -111,6 +111,7 @@ tokenizers==0.22.2
 tomli==2.4.0
 torch==2.9.1
 tqdm==4.67.1
+voyageai
 transformers==4.57.3
 triton==3.5.1
 typer==0.21.1
@@ -124,3 +125,4 @@ watchfiles==1.1.1
 websockets==15.0.1
 xxhash==3.6.0
 zstandard==0.25.0
+voyageai
