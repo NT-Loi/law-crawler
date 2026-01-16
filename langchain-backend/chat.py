@@ -13,7 +13,7 @@ import os
 from enum import Enum
 
 from prompts import (
-    ROUTER_SYSTEM_PROMPT, ROUTER_FEW_SHOT_EXAMPLES,
+    ROUTER_SYSTEM_PROMPT, 
     SELECT_SYSTEM_PROMPT, SELECT_USER_PROMPT,
     ANSWER_SYSTEM_PROMPT, ANSWER_USER_PROMPT,
     CHIT_CHAT_SYSTEM_PROMPT,
@@ -33,6 +33,15 @@ API_KEY = os.getenv("API_KEY", "EMPTY")
 RERANK_THRESHOLD = 0.75
 
 # --- Helper Functions ---
+def clean_reasoning_output(text: str) -> str:
+    if not text: return ""
+    # Xóa nội dung trong thẻ <think>
+    pattern = r"<think>.*?</think>"
+    cleaned_text = re.sub(pattern, "", text, flags=re.DOTALL)
+    # Xóa luôn thẻ nếu nó bị sót (ví dụ model chưa đóng thẻ)
+    cleaned_text = cleaned_text.replace("<think>", "").replace("</think>", "")
+    return cleaned_text.strip()
+
 def format_law_docs_for_prompt(docs):
     blocks = []
     for d in docs:
@@ -108,33 +117,50 @@ class ChatRouter:
         )
 
     async def route(self, query: str, history: List[dict]) -> str:
-        # 1. System Instruction
-        messages = [SystemMessage(content=ROUTER_SYSTEM_PROMPT)]
+        # 1. Format History thành chuỗi text để đưa vào context
+        # Lấy 2 lượt hội thoại gần nhất để tiết kiệm token nhưng đủ context
+        context_str = ""
+        if history:
+            recent_history = history[-2:] 
+            for msg in recent_history:
+                role = "User" if msg['role'] == 'user' else "Bot"
+                content = msg['content']
+                # Cắt ngắn content nếu quá dài để tránh nhiễu router
+                if len(content) > 100: 
+                    content = content[:100] + "..."
+                context_str += f"{role}: {content}\n"
         
-        # 2. Inject Few-Shot Examples (Nạp ví dụ vào)
-        for ex in ROUTER_FEW_SHOT_EXAMPLES:
-            if ex["role"] == "user":
-                messages.append(HumanMessage(content=ex["content"]))
-            else:
-                messages.append(AIMessage(content=ex["content"]))
-        
-        # 3. User Actual Query
-        messages.append(HumanMessage(content=query))
-        
-        # 4. Invoke LLM
-        res = await self.llm.ainvoke(messages)
-        raw_content = res.content
-        intent = clean_reasoning_output(raw_content) 
-        
-        # Debug log để kiểm tra model trả về gì
-        logging.info(f"Router Input: {query} | Raw Output: {intent}")
+        if not context_str:
+            context_str = "Không có lịch sử."
 
-        # 5. Robust Parsing
-        # Đôi khi model trả về "Intent: LEGAL", ta chỉ cần check keyword
+        # 2. Tạo Prompt hoàn chỉnh
+        # Lưu ý: Ta đưa Context và Input vào user message
+        user_input_content = f"""
+            LỊCH SỬ CHAT:
+            {context_str}
+
+            INPUT HIỆN TẠI:
+            "{query}"
+
+            Hãy phân loại INPUT HIỆN TẠI:
+            """
+
+        messages = [
+            SystemMessage(content=ROUTER_SYSTEM_PROMPT),
+            HumanMessage(content=user_input_content)
+        ]
+        
+        # 3. Gọi LLM
+        res = await self.llm.ainvoke(messages)
+        
+        raw_content = res.content
+        intent = clean_reasoning_output(raw_content).strip().upper()
+        
+        logging.info(f"Router Input: {query} | ContextLen: {len(history)} | Output: {intent}")
+
         if "NON_LEGAL" in intent or "NON LEGAL" in intent:
             return "NON_LEGAL"
         
-        # Nếu không phải NON_LEGAL, mặc định đẩy về LEGAL để an toàn
         return "LEGAL"
 
 class WebSearchEngine:
@@ -296,29 +322,60 @@ class LegalRAGChain:
         )
 
     async def chat(self, message, history, rag_engine):
-        # --- BƯỚC 0: MULTI-QUERY REFLECTION ---
-        queries = [message] # Mặc định ít nhất có câu gốc
+        # --- BƯỚC PRE-PROCESSING: LÀM SẠCH HISTORY ---
+        clean_history = []
+        for h in history:
+            # Copy dict để không ảnh hưởng biến gốc
+            msg = h.copy()
+            # Chỉ làm sạch tin nhắn của AI (role assistant)
+            if msg['role'] == 'assistant':
+                msg['content'] = clean_reasoning_output(msg['content'])
+            clean_history.append(msg)
         
+        # Cập nhật biến history dùng cho các bước sau
+        history = clean_history
+
+        # --- BƯỚC 0: MULTI-QUERY REFLECTION ---
+        # 1. Build context từ history
+        chat_history_msgs = []
+        # Lấy tối đa 4 tin nhắn gần nhất để mô hình không bị loạn context
+        for h in history[-4:]: 
+            if h['role'] == 'user':
+                chat_history_msgs.append(HumanMessage(content=h['content']))
+            else:
+                chat_history_msgs.append(AIMessage(content=h['content']))
+        
+        # 2. Gọi LLM
+        queries = [message]
         try:
             reflection_res = await self.llm_fast.ainvoke([
-                SystemMessage(content=REFLECTION_SYSTEM_PROMPT),
+                SystemMessage(content=REFLECTION_SYSTEM_PROMPT), 
+                *chat_history_msgs,
                 HumanMessage(content=REFLECTION_USER_PROMPT.format(question=message))
             ])
             
-            # Clean và Parse JSON
+            # 3. Clean & Parse JSON
             raw_content = clean_reasoning_output(reflection_res.content)
-            # Tìm mảng JSON trong text (phòng trường hợp model nói nhảm thêm bên ngoài)
             match = re.search(r'\[.*?\]', raw_content, re.DOTALL)
+            
             if match:
                 queries = json.loads(match.group(0))
-                logging.info(f"Generated Queries: {queries}")
+                # --- CẬP NHẬT QUERY CHO RERANK ---            
+                # Lấy Query đầu tiên (Query 1 - Trực diện/Ngữ cảnh hóa) làm chuẩn để Rerank
+                if len(queries) > 0:
+                    rerank_query = queries[0]
+                    
+                logging.info(f"Reflected Contextual Queries: {queries}")
+                logging.info(f"Selected Query for Rerank: {rerank_query}")
+            
             else:
-                logging.warning("Reflection did not return JSON list, using raw output as single query.")
                 queries = [raw_content.strip()]
+                rerank_query = queries[0] # Fallback lấy raw nếu ko phải JSON
 
         except Exception as e:
             logging.error(f"Reflection failed: {e}")
             queries = [message]
+            rerank_query = message
 
          # --- BƯỚC 1: PARALLEL SEARCH (CHỈ SEARCH THÔ) ---
         logging.info(f"Searching Qdrant for {len(queries)} queries parallelly...")
@@ -357,9 +414,9 @@ class LegalRAGChain:
         
         ranked_docs = await asyncio.to_thread(
             rag_engine.rerank, 
-            query=message,  # <--- Dùng message gốc
+            query=rerank_query,  # <--- Dùng message gốc
             sources=merged_candidates, 
-            top_k=10 # Lấy top 10 cuối cùng
+            top_k=20 # Lấy top 20 cuối cùng
         )
 
         # --- BƯỚC 2: KIỂM TRA ĐỘ TIN CẬY (LOGIC MỚI) ---
@@ -367,7 +424,7 @@ class LegalRAGChain:
         top_score = ranked_docs[0].get("rerank_score", 0)
         filtered_docs = []
         skip_llm_filter = False
-        top_k = 5
+        top_k = 10
         if top_score > RERANK_THRESHOLD:
             logging.info(f"High Confidence ({top_score:.4f} > {RERANK_THRESHOLD}). Skipping LLM Selection.")
             
@@ -393,7 +450,7 @@ class LegalRAGChain:
             # để nó hiểu ngữ cảnh user muốn gì, thay vì câu query khô khan.
             select_messages = [
                 SystemMessage(content=SELECT_SYSTEM_PROMPT.format(docs_text=docs_text_block)),
-                HumanMessage(content=SELECT_USER_PROMPT.format(question=message)) 
+                HumanMessage(content=SELECT_USER_PROMPT.format(question=rerank_query)) 
             ]
             
             try:
@@ -417,13 +474,6 @@ class LegalRAGChain:
          # --- BƯỚC 4: ANSWERING ---
         final_context = format_law_docs_for_prompt(filtered_docs)
         
-        chat_history_msgs = []
-        for h in history[-4:]: 
-            if h['role'] == 'user':
-                chat_history_msgs.append(HumanMessage(content=h['content']))
-            else:
-                chat_history_msgs.append(SystemMessage(content=h['content'])) 
-
         # Dùng câu hỏi gốc (message) để trả lời cho tự nhiên
         answer_messages = [
             SystemMessage(content=ANSWER_SYSTEM_PROMPT.format(context=final_context))
@@ -442,6 +492,19 @@ class WebLawChain:
         )
 
     async def chat(self, message, history, rag_engine):
+        # --- BƯỚC PRE-PROCESSING: LÀM SẠCH HISTORY ---
+        clean_history = []
+        for h in history:
+            # Copy dict để không ảnh hưởng biến gốc
+            msg = h.copy()
+            # Chỉ làm sạch tin nhắn của AI (role assistant)
+            if msg['role'] == 'assistant':
+                msg['content'] = clean_reasoning_output(msg['content'])
+            clean_history.append(msg)
+        
+        # Cập nhật biến history dùng cho các bước sau
+        history = clean_history
+        yield json.dumps({"type": "status", "message": "Đang tìm kiếm thông tin trên internet..."}, ensure_ascii=False) + "\n"
         # Chạy search trong thread pool để không block server
         web_results = await asyncio.to_thread(self.web_engine.search, message, top_k=50)
         
@@ -473,6 +536,19 @@ class HybridChain:
         )
 
     async def chat(self, message, history, rag_engine):
+        # --- BƯỚC PRE-PROCESSING: LÀM SẠCH HISTORY ---
+        clean_history = []
+        for h in history:
+            # Copy dict để không ảnh hưởng biến gốc
+            msg = h.copy()
+            # Chỉ làm sạch tin nhắn của AI (role assistant)
+            if msg['role'] == 'assistant':
+                msg['content'] = clean_reasoning_output(msg['content'])
+            clean_history.append(msg)
+        
+        # Cập nhật biến history dùng cho các bước sau
+        history = clean_history
+        yield json.dumps({"type": "status", "message": "Đang đối chiếu dữ liệu hệ thống và internet..."}, ensure_ascii=False) + "\n"
         # --- BƯỚC 1: RETRIEVE PARALLEL ---
         
         # Chạy song song: RAG (local/db) và Tavily (network)
@@ -529,13 +605,26 @@ class ChitChatChain:
         )
 
     async def chat(self, message, history, rag_engine):
+        # --- BƯỚC PRE-PROCESSING: LÀM SẠCH HISTORY ---
+        clean_history = []
+        for h in history:
+            # Copy dict để không ảnh hưởng biến gốc
+            msg = h.copy()
+            # Chỉ làm sạch tin nhắn của AI (role assistant)
+            if msg['role'] == 'assistant':
+                msg['content'] = clean_reasoning_output(msg['content'])
+            clean_history.append(msg)
+        
+        # Cập nhật biến history dùng cho các bước sau
+        history = clean_history
+
         messages = [SystemMessage(content=CHIT_CHAT_SYSTEM_PROMPT)]
-        # Add history
+        
         for h in history[-4:]:
             if h['role'] == 'user':
                 messages.append(HumanMessage(content=h['content']))
             else:
-                messages.append(SystemMessage(content=h['content'])) # or AIMessage
+                messages.append(AIMessage(content=h['content'])) 
         
         messages.append(HumanMessage(content=message))
 

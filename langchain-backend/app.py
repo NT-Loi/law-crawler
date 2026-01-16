@@ -89,48 +89,46 @@ async def chat_endpoint(request: ChatRequest):
     if not rag_engine:
         raise HTTPException(status_code=503, detail="RAG Engine not ready")
 
-    try:
-        # 1. BƯỚC 1: ROUTING (CHỈ KHI MODE LÀ AUTO)
-        intent = "LEGAL"
-        if request.mode == ChatMode.AUTO:
-            intent = await router.route(request.message, request.history)
-        logging.info(f"Query: {request.message} | Intent Detected: {intent} | User Mode: {request.mode}")
-
-        engine = None
-
-        # 2. BƯỚC 2: QUYẾT ĐỊNH ENGINE
-        
-        # Trường hợp A: Nếu là chuyện phiếm (NON_LEGAL) -> Luôn dùng ChitChat
-        if intent == "NON_LEGAL":
-            engine = chit_chat_chain
-        
-        # Trường hợp B: Nếu là câu hỏi pháp luật (LEGAL)
-        else:
-            # Dựa vào User Mode để chọn nguồn dữ liệu
+    async def chat_streamer():
+        try:
+            # 1. BƯỚC 1: ROUTING (LUÔN CHẠY để lọc rác/xã giao)
+            yield json.dumps({"type": "status", "message": "Đang phân tích yêu cầu..."}, ensure_ascii=False) + "\n"
             
-            if request.mode == ChatMode.WEB:
-                engine = web_chain
-                
-            elif request.mode == ChatMode.HYBRID:
-                engine = hybrid_chain
-                
-            else:
-                # Bao gồm: ChatMode.AUTO và ChatMode.LAW_DB
-                # Mặc định của AUTO là dùng kho văn bản (RAG)
-                engine = legal_rag_chain
+            intent = await router.route(request.message, request.history)
+            logging.info(f"Query: {request.message} | Intent Detected: {intent} | User Mode: {request.mode}")
 
-        # 3. STREAM OR FULL RESPONSE
+            engine = None
+            # 2. BƯỚC 2: QUYẾT ĐỊNH ENGINE
+            if intent == "NON_LEGAL":
+                engine = chit_chat_chain
+            else:
+                if request.mode == ChatMode.WEB:
+                    engine = web_chain
+                elif request.mode == ChatMode.HYBRID:
+                    engine = hybrid_chain
+                else:
+                    engine = legal_rag_chain
+
+            # 3. STREAM FROM ENGINE
+            async for chunk in engine.chat(request.message, request.history, rag_engine):
+                yield chunk
+
+        except Exception as e:
+            logging.error(f"Streaming error: {str(e)}")
+            yield json.dumps({"type": "error", "content": f"Lỗi hệ thống: {str(e)}"}, ensure_ascii=False) + "\n"
+
+    try:
         if request.stream:
             return StreamingResponse(
-                engine.chat(request.message, request.history, rag_engine),
+                chat_streamer(),
                 media_type="application/x-ndjson"
             )
         else:
-            # Collect full response
+            # Collect full response (Non-streaming mode)
             full_content = ""
             used_docs = []
             
-            async for chunk in engine.chat(request.message, request.history, rag_engine):
+            async for chunk in chat_streamer():
                 try:
                     data = json.loads(chunk)
                     if data['type'] == 'content':
