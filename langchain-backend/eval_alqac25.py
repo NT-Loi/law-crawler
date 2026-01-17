@@ -15,6 +15,7 @@ from chat import LegalRAGChain, clean_reasoning_output
 from prompts import ALQAC_ANSWER_SYSTEM_PROMPT
 from utils import get_alqac_point_id
 
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -174,27 +175,24 @@ async def evaluate_alqac25(input_file, output_file, limit=None):
 
         # Extract the final answer
         predicted_answer = system_response.strip().replace(".", "").replace(":", "")
-        if q_type == "Đúng/Sai":
-            if "Đúng" in predicted_answer[:10]:
-                predicted_answer = "Đúng"
-            elif "Sai" in predicted_answer[:10]:
-                predicted_answer = "Sai"
-        elif q_type == "Trắc nghiệm":
-            match = re.search(r'\b([A-D])\b', predicted_answer)
-            if match:
-                predicted_answer = match.group(1)
-            else:
-                predicted_answer = predicted_answer[:1]
-        else:
-            # Tự luận - keep as is for semantic comparison later
-            predicted_answer = system_response.strip()
-
         # Check correctness
-        if q_type == "Tự luận":
-            # Simple normalized comparison for essay
-            correct = predicted_answer.lower().replace(" ", "") == reference_answer.lower().replace(" ", "")
+        rouge_scores = None
+        if q_type == "Đúng/Sai":
+             if "Đúng" in predicted_answer[:10]:
+                predicted_answer = "Đúng"
+             elif "Sai" in predicted_answer[:10]:
+                predicted_answer = "Sai"
+             correct = predicted_answer == reference_answer
+        elif q_type == "Trắc nghiệm":
+             match = re.search(r'\b([A-D])\b', predicted_answer)
+             if match:
+                 predicted_answer = match.group(1)
+             else:
+                 predicted_answer = predicted_answer[:1]
+             correct = predicted_answer == reference_answer
         else:
-            correct = predicted_answer == reference_answer
+             # Tự luận - simple comparison fallback
+             correct = predicted_answer.strip().lower() == reference_answer.strip().lower()
 
         results.append({
             "question_id": qid,
@@ -212,7 +210,8 @@ async def evaluate_alqac25(input_file, output_file, limit=None):
                 {"id": d.get("id"), "doc_id": d.get("doc_id"), "article_id": d.get("article_id")}
                 for d in used_docs
             ],
-            "ground_truth_articles": ground_truth_map.get(qid, [])
+            "ground_truth_articles": ground_truth_map.get(qid, []),
+            "rouge_scores": rouge_scores
         })
         
         # Save periodically

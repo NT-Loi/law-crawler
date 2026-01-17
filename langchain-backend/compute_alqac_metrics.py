@@ -15,14 +15,17 @@ def compute_metrics(results_path):
         print("Error: Results file is empty.")
         return
 
-    total = len(results)
-    correct = sum(1 for r in results if r['is_correct'])
+    # Filter out Essay/Tự luận for Accuracy Calculation
+    results_for_acc = [r for r in results if r['type'] not in ["Tự luận", "Essay"]]
+    
+    total = len(results_for_acc)
+    correct = sum(1 for r in results_for_acc if r['is_correct'])
     
     # Answer Accuracy
-    types = sorted(list(set(r['type'] for r in results)))
+    types = sorted(list(set(r['type'] for r in results_for_acc)))
     accuracy_by_type = {}
     for t in types:
-        type_results = [r for r in results if r['type'] == t]
+        type_results = [r for r in results_for_acc if r['type'] == t]
         type_total = len(type_results)
         type_correct = sum(1 for r in type_results if r['is_correct'])
         accuracy_by_type[t] = {
@@ -108,9 +111,11 @@ def compute_metrics(results_path):
         for opt, count in mc_errors.most_common():
             print(f"- **Option {opt}**: {count} errors")
 
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compute metrics for ALQAC-2025 evaluation results")
-    parser.add_argument("--results", default="/home/nt-loi/law-chatbot/data/alqac25_eval_results_v3.json", help="Path to evaluation results JSON")
+    parser.add_argument("--results", default="/home/nt-loi/law-chatbot/data/alqac25_eval_results.json", help="Path to evaluation results JSON")
     args = parser.parse_args()
     
     compute_metrics(args.results)

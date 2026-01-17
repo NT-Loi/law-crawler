@@ -435,8 +435,7 @@ class LegalRAGChain:
             docs_for_selection = ranked_docs[:top_k]
             docs_text_block = format_law_docs_for_prompt(docs_for_selection)
             
-            # LƯU Ý: Ở bước lọc này, vẫn nên cho LLM xem câu hỏi gốc (message) 
-            # để nó hiểu ngữ cảnh user muốn gì, thay vì câu query khô khan.
+            # LƯU Ý: Ở bước lọc này, cho LLM xem rerank_query để nó hiểu ngữ cảnh user muốn gì.
             select_messages = [
                 SystemMessage(content=SELECT_SYSTEM_PROMPT.format(docs_text=docs_text_block)),
                 HumanMessage(content=SELECT_USER_PROMPT.format(question=rerank_query)) 
@@ -497,22 +496,22 @@ class WebLawChain:
         
         # Run search in thread pool
         web_results = await asyncio.to_thread(self.web_engine.search, message, top_k=10)
-        
+        logging.info(f'Web Results: {web_results[0].keys()}')
         if not web_results:
             yield json.dumps({"type": "content", "delta": "Không tìm thấy thông tin trên internet."}, ensure_ascii=False) + "\n"
             return
         
         # Return sources (only once)
         yield json.dumps({"type": "sources", "data": web_results}, ensure_ascii=False) + "\n"
-        logging.info(f'Web Results: {len(web_results)} items')
+        # logging.info(f'Web Results: {len(web_results)} items')
         
         # Build chat history messages
         chat_history_msgs = []
         for h in history[-4:]:
             if h['role'] == 'user':
-                chat_history_msgs.append(HumanMessage(content=h['content'][:500]))
+                chat_history_msgs.append(HumanMessage(content=h['content']))
             else:
-                chat_history_msgs.append(AIMessage(content=h['content'][:500]))
+                chat_history_msgs.append(AIMessage(content=h['content']))
         
         # Answer with history context
         messages = [
@@ -578,20 +577,20 @@ class HybridChain:
             source_label = "[KHO_LUAT]" if d.get("source_type") == "LAW_DB" else "[INTERNET]"
             doc_id = d.get('id', d.get('url', 'unknown'))
             context_blocks.append(f"""
-{source_label}
-[ID: {doc_id}]
-Tiêu đề: {d.get('title', '')}
-Nội dung: {d.get('content', '')}
-""")
+                {source_label}
+                [INTERNAL_ID: {doc_id}]
+                Tiêu đề: {d.get('title', '')}
+                Nội dung: {d.get('content', '')}
+                """)
         full_context = "\n---\n".join(context_blocks)
 
         # Build chat history messages
         chat_history_msgs = []
         for h in history[-4:]:
             if h['role'] == 'user':
-                chat_history_msgs.append(HumanMessage(content=h['content'][:500]))
+                chat_history_msgs.append(HumanMessage(content=h['content']))
             else:
-                chat_history_msgs.append(AIMessage(content=h['content'][:500]))
+                chat_history_msgs.append(AIMessage(content=h['content']))
 
         # Answering with history context
         messages = [

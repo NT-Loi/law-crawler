@@ -10,6 +10,7 @@ from typing import List, Optional
 from pydantic import BaseModel
 import re
 import json
+from urllib.parse import unquote
 
 from prometheus_fastapi_instrumentator import Instrumentator
 
@@ -29,7 +30,7 @@ hybrid_chain = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global router, legal_rag_chain, web_chain, chit_chat_chain, rag_engine
+    global router, legal_rag_chain, web_chain, chit_chat_chain, hybrid_chain, rag_engine
     
     # 1. Init RAG Engine (Heavy loading)
     try:
@@ -210,6 +211,24 @@ async def get_document(doc_id: str, session: AsyncSession = Depends(get_async_se
     Now uses PostgreSQL for fast retrieval instead of Qdrant payload scanning.
     """
     try:
+        # Decode doc_id (in case it's a URL encoded by frontend)
+        doc_id = unquote(doc_id)
+
+        # Handle URL as doc_id (for Web References)
+        if doc_id.startswith("http://") or doc_id.startswith("https://"):
+             return {
+                "metadata": {
+                    "id": doc_id,
+                    "title": "Tài liệu tham khảo từ Internet",
+                    "url": doc_id,
+                    "source": "web"
+                },
+                "content": [{
+                    "type": "text",
+                    "title": "Nguồn Internet",
+                    "content": f"Đây là tài liệu được tìm thấy trên Internet. Bạn có thể xem chi tiết tại đường dẫn gốc: {doc_id}"
+                }]
+            }
         # Detect source based on ID pattern:
         # - IDs with hyphen (-) are from phapdien (UUID format)
         # - IDs without hyphen are from vbqppl (e.g. "15/2012/TT-BGTVT")

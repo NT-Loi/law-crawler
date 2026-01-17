@@ -4,24 +4,9 @@ A Retrieval-Augmented Generation (RAG) chatbot for Vietnamese legal documents, b
 
 ## 🏗️ Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Frontend (React)                        │
-└─────────────────────────────────────────────────────────────────┘
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    FastAPI Backend (app.py)                     │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │   Router    │  │  RAG Chain  │  │    Chat Strategies      │  │
-│  │  (chat.py)  │  │  (rag.py)   │  │  Legal/Web/Hybrid/Chit  │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-         ▼                   ▼                      ▼
-┌─────────────┐     ┌─────────────┐      ┌──────────────────┐
-│   Qdrant    │     │ PostgreSQL  │      │   Voyage AI      │
-│  (Vectors)  │     │ (Documents) │      │   (Reranker)     │
-└─────────────┘     └─────────────┘      └──────────────────┘
-```
+![System Architecture](images/image.png)
+
+The system utilizes **Tavily API** to support Web Search and Hybrid Search modes, allowing the chatbot to access up-to-date information from the internet alongside the local legal database.
 
 ## 🧠 RAG Pipeline Details
 
@@ -39,7 +24,7 @@ VBQPPL Document
 
 **Why Điều-level chunking?** Legal articles are semantic units; splitting mid-article loses meaning. Each chunk is embedded with context: `{title}\n{hierarchy_path}\n{content}`.
 
-### Complete RAG Pipeline
+<!-- ### Complete RAG Pipeline
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -103,7 +88,7 @@ VBQPPL Document
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                      Streaming Response + Rich Citations                    │
 └─────────────────────────────────────────────────────────────────────────────┘
-```
+``` -->
 
 ### Pipeline Stage Details
 
@@ -112,7 +97,7 @@ VBQPPL Document
 | **1. Router** | `ChatRouter` | Classifies query as LEGAL/NON_LEGAL using last 2 history messages |
 | **2. Reflection** | `REFLECTION_SYSTEM_PROMPT` | Generates 3 search queries; Q1 resolves pronouns from history |
 | **3. Search** | `rag.retrieve()` | Hybrid search (dense + BM25) with RRF fusion, runs 3 queries in parallel |
-| **4. Rerank** | Voyage AI `rerank-2` | Semantic reranking using contextualized Q1 |
+| **4. Rerank** | Voyage AI `rerank-2.5` | Semantic reranking using contextualized Q1 |
 | **5. Filter** | Confidence check | Score > 0.75 skips LLM; otherwise LLM selects relevant doc IDs |
 | **6. Answer** | `answer_llm` | Generates response with `<USED_DOCS>` citation tags |
 
@@ -125,7 +110,7 @@ VBQPPL Document
 | Answer LLM | Last 4 messages as conversation context |
 | ChitChat | Last 4 messages for natural flow |
 
-### Key Design Decisions
+<!-- ### Key Design Decisions
 
 | Decision | Rationale |
 |----------|-----------|
@@ -133,7 +118,7 @@ VBQPPL Document
 | Hierarchy path in embeddings | Same article number differs across chapters |
 | Q1 for reranking | Contextualized query captures intent better |
 | 0.75 confidence threshold | High scores = clear match, skip LLM for speed |
-| 4-message history limit | Balance context vs. token efficiency |
+| 4-message history limit | Balance context vs. token efficiency | -->
 
 ## 📋 Prerequisites
 
@@ -147,7 +132,7 @@ VBQPPL Document
 ### 1. Clone and Setup
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/NT-Loi/law-chatbot.git
 cd law-chatbot
 
 # Create virtual environments
@@ -269,9 +254,7 @@ python ingest_psql.py --drop
 ### Start vLLM Server (if using local model)
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-    --model JunHowie/Qwen3-4B-GPTQ-Int4 \
-    --trust-remote-code
+vllm serve JunHowie/Qwen3-4B-GPTQ-Int4 --host 0.0.0.0 --port 8000 --max-num-seqs 1 --gpu-memory-utilization 0.90 --enforce-eager --trust-remote-code > vllm.log 2>&1
 ```
 
 ### Start FastAPI Backend
@@ -344,23 +327,23 @@ The system computes **Retrieval Metrics** and **Citation Metrics**:
 | **Citation Recall** | `matched_gt / total_gt` | Percentage of ground truth citations the LLM actually cited in its answer |
 | **Citation Precision** | `relevant_used / total_used` | Percentage of LLM's citations that are actually relevant |
 
-#### Matching Methodology
+<!-- #### Matching Methodology
 
 The evaluation uses **fuzzy string matching** (SequenceMatcher ratio ≥ 0.5) because:
 - Vietnamese legal citations have variations ("Điều 5" vs "Điều 5.")
 - Hierarchy paths require reconstruction from document metadata
-- Different formatting styles exist across documents
+- Different formatting styles exist across documents -->
 
-**Citation extraction** parses legal references like:
+<!-- **Citation extraction** parses legal references like:
 - "Điều 5 Luật Thanh niên 2020"
 - "Nghị định 100/2019/NĐ-CP"
-- "Khoản 2 Điều 3 Thông tư 01/2021/TT-BTP"
+- "Khoản 2 Điều 3 Thông tư 01/2021/TT-BTP" -->
 
 #### ALQAC-2025 Specific Metrics
 
 | Metric | Description |
 |--------|-------------|
-| **Answer Accuracy** | Exact match for Đúng/Sai (True/False) and MCQ questions |
+| **Answer Accuracy** | Exact match for Đúng/Sai (True/False) and Multiple Choices (A,B,C,D) |
 | **Retrieval F1** | `2 × P × R / (P + R)` for context documents |
 | **Citation F1** | `2 × P × R / (P + R)` for used documents |
 
@@ -401,7 +384,7 @@ law-chatbot/
 └── frontend/              # React frontend
 ```
 
-## � Monitoring (Prometheus & Grafana)
+## Monitoring (Prometheus & Grafana)
 
 The project includes observability infrastructure for monitoring API performance.
 
@@ -474,7 +457,7 @@ sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total
 | Error Rate | `sum(rate(http_requests_total{status=~"5.."}[5m]))` | 5xx errors per second |
 | Active Requests | `http_requests_in_progress` | Concurrent connections |
 
-## �🔧 Troubleshooting
+## 🔧 Troubleshooting
 
 ### Qdrant Connection Error
 ```bash

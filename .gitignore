@@ -37,8 +37,8 @@ BoPhapDienDienTu.zip
 qdrant_data/
 *.json
 *.html
-*.txt
 *.csv
+paper/
 
 # IDEs / Editors
 .idea/
