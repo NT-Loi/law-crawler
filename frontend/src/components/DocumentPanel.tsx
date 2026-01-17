@@ -1,14 +1,10 @@
 import { FileText, ExternalLink, ChevronRight, X } from 'lucide-react';
 import Button from './ui/Button';
 
-interface DocumentNode {
-    id: number;
-    doc_id: string;
-    anchor: string;
+interface ContentSection {
     type: string;
     title: string;
     content: string;
-    is_structure: boolean;
 }
 
 interface Document {
@@ -16,8 +12,11 @@ interface Document {
         id: string;
         title: string;
         url: string;
+        source?: string;  // 'vbqppl' | 'phapdien'
     };
-    content: DocumentNode[];
+    content: ContentSection[];
+    full_content?: string;
+    references?: Array<{ name: string; link: string }>;
 }
 
 interface DocumentPanelProps {
@@ -44,14 +43,18 @@ const DocumentPanel = ({ document, onClose }: DocumentPanelProps) => {
         );
     }
 
+    const sourceBadge = document.metadata.source === 'phapdien'
+        ? { label: 'Pháp Điển', color: 'bg-emerald-500/10 text-emerald-500' }
+        : { label: 'VBQPPL', color: 'bg-amber-500/10 text-amber-500' };
+
     return (
         <div className="h-full flex flex-col bg-slate-900/50 rounded-2xl border border-slate-800 overflow-hidden animate-fade-in">
             {/* Header */}
             <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between">
                 <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 text-xs text-slate-500 mb-1">
-                        <span className="px-2 py-0.5 bg-amber-500/10 text-amber-500 rounded font-medium">
-                            VBQPPL
+                        <span className={`px-2 py-0.5 rounded font-medium ${sourceBadge.color}`}>
+                            {sourceBadge.label}
                         </span>
                         <ChevronRight className="w-3 h-3" />
                         <span className="truncate">{document.metadata.id}</span>
@@ -81,48 +84,61 @@ const DocumentPanel = ({ document, onClose }: DocumentPanelProps) => {
             </div>
 
             {/* Content */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-8">
-                {document.content.map((node, index) => {
-                    const isChapter = node.type.includes('chuong');
-                    const isArticle = node.type.includes('dieu');
+            <div className="flex-1 overflow-y-auto p-6 space-y-8 custom-scrollbar">
+                {document.full_content ? (
+                    <div className="bg-slate-800/30 p-8 rounded-2xl border border-slate-800/50 leading-relaxed whitespace-pre-wrap text-slate-300 font-sans text-base shadow-inner">
+                        {document.full_content}
+                    </div>
+                ) : document.content && document.content.length > 0 ? (
+                    document.content.map((section, index) => {
+                        const title = section.title?.toLowerCase() || '';
+                        const isChapter = title.includes('chương') || title.includes('phần');
+                        const isArticle = title.includes('điều') || title.startsWith('điều');
 
-                    return (
-                        <article
-                            key={index}
-                            className={`animate-slide-up ${isChapter ? 'pt-4' : ''
-                                }`}
-                            style={{ animationDelay: `${index * 50}ms` }}
-                        >
-                            <div
-                                className={`rounded-xl transition-all ${isChapter
+                        return (
+                            <article
+                                key={index}
+                                className={`animate-slide-up ${isChapter ? 'pt-4' : ''}`}
+                                style={{ animationDelay: `${Math.min(index * 30, 300)}ms` }}
+                            >
+                                <div
+                                    className={`rounded-xl transition-all ${isChapter
                                         ? 'bg-amber-500/5 border border-amber-500/10 p-5'
                                         : isArticle
                                             ? 'bg-slate-800/50 border border-slate-700/50 p-5 hover:border-slate-600'
-                                            : 'pl-4 border-l-2 border-slate-700'
-                                    }`}
-                            >
-                                <h3
-                                    className={`font-bold mb-3 ${isChapter
-                                            ? 'text-xl text-amber-500'
-                                            : isArticle
-                                                ? 'text-base text-white'
-                                                : 'text-sm text-slate-300'
+                                            : 'bg-slate-800/30 p-4 border-l-2 border-slate-700'
                                         }`}
                                 >
-                                    {node.title}
-                                </h3>
-                                <div
-                                    className={`leading-relaxed whitespace-pre-wrap ${isChapter
+                                    {section.title && (
+                                        <h3
+                                            className={`font-bold mb-3 ${isChapter
+                                                ? 'text-xl text-amber-500'
+                                                : isArticle
+                                                    ? 'text-base text-white'
+                                                    : 'text-sm text-slate-300'
+                                                }`}
+                                        >
+                                            {section.title}
+                                        </h3>
+                                    )}
+                                    <div
+                                        className={`leading-relaxed whitespace-pre-wrap ${isChapter
                                             ? 'text-sm text-slate-400 font-medium'
                                             : 'text-sm text-slate-400'
-                                        }`}
-                                >
-                                    {node.content}
+                                            }`}
+                                    >
+                                        {section.content}
+                                    </div>
                                 </div>
-                            </div>
-                        </article>
-                    );
-                })}
+                            </article>
+                        );
+                    })
+                ) : (
+                    <div className="flex flex-col items-center justify-center py-20 text-slate-500">
+                        <FileText className="w-12 h-12 mb-4 opacity-20" />
+                        <p>Nội dung văn bản đang được cập nhật...</p>
+                    </div>
+                )}
             </div>
 
             {/* Footer */}
