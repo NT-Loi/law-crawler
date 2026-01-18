@@ -115,7 +115,7 @@ def compute_metrics(results_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compute metrics for ALQAC-2025 evaluation results")
-    parser.add_argument("--results", default="/home/nt-loi/law-chatbot/data/alqac25_eval_results.json", help="Path to evaluation results JSON")
+    parser.add_argument("--results", default="/home/nt-loi/law-chatbot/data/alqac25_eval_results_v3.json", help="Path to evaluation results JSON")
     args = parser.parse_args()
     
     compute_metrics(args.results)

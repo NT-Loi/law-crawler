@@ -98,6 +98,9 @@ async def evaluate_alqac25(input_file, output_file, limit=None):
             continue
             
         q_type = item.get("question_type") or item.get("type")
+        if q_type:
+            q_type = q_type.strip()
+            
         q_content = item.get("text") or item.get("question_content") or item.get("question")
         reference_answer = item.get("answer") or item.get("answer_content") or item.get("reference_answer")
         
@@ -106,7 +109,22 @@ async def evaluate_alqac25(input_file, output_file, limit=None):
             user_msg = q_content
             query = q_content
         elif q_type == "Trắc nghiệm":
-            choices = item.get("choices", {})
+            choices = item.get("choices")
+            if isinstance(choices, str):
+                try:
+                    # Try flexible parsing
+                    choices = ast.literal_eval(choices)
+                except:
+                    try:
+                        choices = json.loads(choices)
+                    except:
+                        logging.warning(f"Could not parse choices for {qid}: {choices}")
+                        choices = {}
+            
+            if not choices:
+                logging.warning(f"MCQ Question {qid} has no choices found! item keys: {item.keys()}")
+                choices = {}
+
             choices_str = "\n".join([f"{k}: {v}" for k, v in choices.items()])
             user_msg = f"{q_content}\n\nCác phương án:\n{choices_str}"
         else:

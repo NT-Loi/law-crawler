@@ -254,17 +254,17 @@ NGUYÊN TẮC VÀ ĐỊNH DẠNG TRẢ LỜI (BẮT BUỘC):
    - Với [KHO_LUAT]: Trích dẫn bằng `TÊN_VĂN_BẢN` và `ĐƯỜNG_DẪN` (Ví dụ: "Theo Điều 5 Luật Thanh niên...").
    - Với [INTERNET]: Trích dẫn nguồn (Ví dụ: "Theo bài viết trên Thư viện Pháp luật...", "Theo báo Chính phủ...").
    - CẤM: Không nhắc đến mã `INTERNAL_ID`.
-
+f
 3. **CẤU TRÚC PHẢN HỒI (Tư duy pháp lý):**
    - **Mở đầu**: Đưa ra câu trả lời trực tiếp cho vấn đề.
    - **Chi tiết**: Giải thích nội dung quy định từ [KHO_LUAT] và bổ sung thông tin từ [INTERNET].
    - **Kết luận/Lưu ý**: Các ngoại lệ hoặc lời khuyên thêm.
 
 4. **LƯU Ý QUAN TRỌNG (BẮT BUỘC)**:
-   - KHÔNG CẦN và KHÔNG ĐƯỢC tạo mục "Tài liệu tham khảo" ở cuối câu trả lời để liệt kê lại INTERNAL_ID/URL.
+   - KHÔNG ĐƯỢC tạo mục "Tài liệu tham khảo" hoặc "Nguồn văn bản" hoặc "Căn cứ pháp lý" ở cuối câu trả lời để liệt kê lại INTERNAL_ID/URL.
    - Việc báo cáo nguồn cho hệ thống CHỈ được thực hiện qua thẻ `<USED_DOCS>`.
    - Trả lời xong nội dung -> Xuống dòng -> Viết thẻ `<USED_DOCS>`.
-   - Định dạng: ...Nội dung trả lời... <USED_DOCS>internal_id1, url2, internal_id3</USED_DOCS>
+   - Định dạng: ...Nội dung trả lời... <USED_DOCS>url1, url2, id1, id2</USED_DOCS>
 
 5. **TRÌNH BÀY MARKDOWN**:
    - **In đậm**: Tên văn bản, Điều khoản, Mức phạt, Thời hạn.

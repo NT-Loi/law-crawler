@@ -213,20 +213,18 @@ async def get_document(doc_id: str, session: AsyncSession = Depends(get_async_se
     try:
         # Decode doc_id (in case it's a URL encoded by frontend)
         doc_id = unquote(doc_id)
-
-        # Handle URL as doc_id (for Web References)
-        if doc_id.startswith("http://") or doc_id.startswith("https://"):
+        if doc_id.lower().startswith("http"):
              return {
                 "metadata": {
                     "id": doc_id,
-                    "title": "Tài liệu tham khảo từ Internet",
+                    "title": "Tài liệu trực tuyến",
                     "url": doc_id,
                     "source": "web"
                 },
                 "content": [{
                     "type": "text",
                     "title": "Nguồn Internet",
-                    "content": f"Đây là tài liệu được tìm thấy trên Internet. Bạn có thể xem chi tiết tại đường dẫn gốc: {doc_id}"
+                    "content": f"Đây là tài liệu được tham khảo từ internet. Vui lòng truy cập đường dẫn gốc: {doc_id}"
                 }]
             }
         # Detect source based on ID pattern:

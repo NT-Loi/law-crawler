@@ -84,6 +84,52 @@ def parse_selected_ids(llm_output: str) -> List[str]:
         logging.error(f"Failed to parse IDs from: {llm_output}")
         return []
 
+async def reflect_query(llm_fast, message: str, history: List[dict]) -> tuple[List[str], str]:
+    """Generates extracted queries and a specific rerank query from message history."""
+    # Build context từ history
+    chat_history_msgs = []
+    # Lấy tối đa 4 tin nhắn gần nhất để mô hình không bị loạn context
+    for h in history[-4:]: 
+        if h['role'] == 'user':
+            chat_history_msgs.append(HumanMessage(content=h['content']))
+        else:
+            chat_history_msgs.append(AIMessage(content=h['content']))
+    
+    # Gọi LLM
+    queries = [message]
+    rerank_query = message
+    
+    try:
+        reflection_res = await llm_fast.ainvoke([
+            SystemMessage(content=REFLECTION_SYSTEM_PROMPT), 
+            *chat_history_msgs,
+            HumanMessage(content=REFLECTION_USER_PROMPT.format(question=message))
+        ])
+        
+        # Clean & Parse JSON
+        raw_content = clean_reasoning_output(reflection_res.content)
+        match = re.search(r'\[.*?\]', raw_content, re.DOTALL)
+        
+        if match:
+            queries = json.loads(match.group(0))
+            # Cập nhật query cho rerank
+            if len(queries) > 0:
+                rerank_query = queries[0]
+                
+            logging.info(f"Reflected Contextual Queries: {queries}")
+            logging.info(f"Selected Query for Rerank: {rerank_query}")
+        
+        else:
+            queries = [raw_content.strip()]
+            rerank_query = queries[0] # Fallback lấy raw nếu ko phải JSON
+
+    except Exception as e:
+        logging.error(f"Reflection failed: {e}")
+        queries = [message]
+        rerank_query = message
+        
+    return queries, rerank_query
+
 # --- Data Models ---
 class ChatMode(str, Enum):
     AUTO = "auto"      
@@ -203,7 +249,7 @@ class WebSearchEngine:
             return []
 
 # --- Helper Logic for Streaming with Citations ---
-async def stream_with_citations(llm, messages, rag_engine=None, collection_names=None):
+async def stream_with_citations(llm, messages, rag_engine=None, collection_names=None, context_docs=None):
     """
     Handles streaming response from LLM, parsing <USED_DOCS> tags 
     to separate content from citations.
@@ -268,7 +314,16 @@ async def stream_with_citations(llm, messages, rag_engine=None, collection_names
             ids_str = current_buffer 
             
         clean_ids_str = ids_str.replace(">", "")
-        used_ids = [id.strip() for id in clean_ids_str.split(",") if id.strip()]
+        
+        # Robust cleaning of IDs
+        used_ids = []
+        for raw_id in clean_ids_str.split(","):
+             clean_id = raw_id.strip()
+             # Remove common prefixes model might output
+             clean_id = re.sub(r'^\[?INTERNAL_ID:\s*', '', clean_id, flags=re.IGNORECASE)
+             clean_id = clean_id.replace(']', '')
+             if clean_id:
+                 used_ids.append(clean_id)
     else:
         # Flush remaining buffer as text if no tag found
         if buffer:
@@ -276,12 +331,43 @@ async def stream_with_citations(llm, messages, rag_engine=None, collection_names
 
     # Send used_docs event
     if used_ids:
-        if rag_engine:
-             # Load full details from Qdrant
-             rich_docs = await asyncio.to_thread(rag_engine.get_documents_by_ids, used_ids, collection_names=collection_names)
-             yield json.dumps({"type": "used_docs", "data": rich_docs}, ensure_ascii=False) + "\n"
-        else:
-             yield json.dumps({"type": "used_docs", "ids": used_ids}, ensure_ascii=False) + "\n"
+        final_used_docs = []
+        ids_to_fetch = []
+        
+        # Helper to find doc in context_docs by ID or URL
+        def find_in_context(uid):
+            if not context_docs:
+                return None
+            for d in context_docs:
+                # Check various common ID fields
+                c_id = str(d.get('id', ''))
+                c_url = str(d.get('url', ''))
+                c_doc_id = str(d.get('doc_id', ''))
+                if uid == c_id or uid == c_url or uid == c_doc_id:
+                    return d
+            return None
+
+        for uid in used_ids:
+            found_doc = find_in_context(uid)
+            if found_doc:
+                final_used_docs.append(found_doc)
+            elif rag_engine:
+                 ids_to_fetch.append(uid)
+            # If no rag_engine and not in context, we can't do much (or create specific placeholder)
+        
+        if ids_to_fetch and rag_engine:
+             # Load full details from Qdrant for missing IDs
+             fetched_docs = await asyncio.to_thread(rag_engine.get_documents_by_ids, ids_to_fetch, collection_names=collection_names)
+             final_used_docs.extend(fetched_docs)
+        
+        # Fallback: If after all extraction we still have nothing (e.g. valid IDs but fetch failed)
+        # Note: We might have partial results.
+        
+        yield json.dumps({"type": "used_docs", "data": final_used_docs}, ensure_ascii=False) + "\n"
+
+    elif context_docs:
+        # Fallback to context_docs if no specific citations found
+        yield json.dumps({"type": "used_docs", "data": context_docs}, ensure_ascii=False) + "\n"
 
     logging.info(f"Final Used references: {used_ids}")
 
@@ -325,46 +411,7 @@ class LegalRAGChain:
         history = clean_history
 
         # --- BƯỚC 0: MULTI-QUERY REFLECTION ---
-        # 1. Build context từ history
-        chat_history_msgs = []
-        # Lấy tối đa 4 tin nhắn gần nhất để mô hình không bị loạn context
-        for h in history[-4:]: 
-            if h['role'] == 'user':
-                chat_history_msgs.append(HumanMessage(content=h['content']))
-            else:
-                chat_history_msgs.append(AIMessage(content=h['content']))
-        
-        # 2. Gọi LLM
-        queries = [message]
-        try:
-            reflection_res = await self.llm_fast.ainvoke([
-                SystemMessage(content=REFLECTION_SYSTEM_PROMPT), 
-                *chat_history_msgs,
-                HumanMessage(content=REFLECTION_USER_PROMPT.format(question=message))
-            ])
-            
-            # 3. Clean & Parse JSON
-            raw_content = clean_reasoning_output(reflection_res.content)
-            match = re.search(r'\[.*?\]', raw_content, re.DOTALL)
-            
-            if match:
-                queries = json.loads(match.group(0))
-                # --- CẬP NHẬT QUERY CHO RERANK ---            
-                # Lấy Query đầu tiên (Query 1 - Trực diện/Ngữ cảnh hóa) làm chuẩn để Rerank
-                if len(queries) > 0:
-                    rerank_query = queries[0]
-                    
-                logging.info(f"Reflected Contextual Queries: {queries}")
-                logging.info(f"Selected Query for Rerank: {rerank_query}")
-            
-            else:
-                queries = [raw_content.strip()]
-                rerank_query = queries[0] # Fallback lấy raw nếu ko phải JSON
-
-        except Exception as e:
-            logging.error(f"Reflection failed: {e}")
-            queries = [message]
-            rerank_query = message
+        queries, rerank_query = await reflect_query(self.llm_fast, message, history)
 
          # --- BƯỚC 1: PARALLEL SEARCH (CHỈ SEARCH THÔ) ---
         logging.info(f"Searching Qdrant for {len(queries)} queries parallelly...")
@@ -462,15 +509,24 @@ class LegalRAGChain:
         # --- BƯỚC 4: ANSWERING ---
         final_context = format_law_docs_for_prompt(filtered_docs)
         
+        
         # Decide which system prompt to use
         current_system_prompt = system_prompt if system_prompt else ANSWER_SYSTEM_PROMPT
+        
+        # Build chat history messages
+        chat_history_msgs = []
+        for h in history[-4:]:
+            if h['role'] == 'user':
+                chat_history_msgs.append(HumanMessage(content=h['content']))
+            else:
+                chat_history_msgs.append(AIMessage(content=h['content']))
         
         # Dùng câu hỏi gốc (message) để trả lời cho tự nhiên
         answer_messages = [
             SystemMessage(content=current_system_prompt.format(context=final_context))
         ] + chat_history_msgs + [HumanMessage(content=ANSWER_USER_PROMPT.format(question=message))]
 
-        async for chunk in stream_with_citations(self.answer_llm, answer_messages, rag_engine=rag_engine, collection_names=collection_names):
+        async for chunk in stream_with_citations(self.answer_llm, answer_messages, rag_engine=rag_engine, collection_names=collection_names, context_docs=filtered_docs):
             yield chunk
 
 
@@ -480,6 +536,10 @@ class WebLawChain:
         self.llm = ChatOpenAI(
             base_url=BASE_URL, api_key=API_KEY, model=CHAT_MODEL,
             temperature=0.3, streaming=True
+        )
+        self.llm_fast = ChatOpenAI(
+            base_url=BASE_URL, api_key=API_KEY, model=CHAT_MODEL, 
+            temperature=0.0, max_tokens=1024 
         )
 
     async def chat(self, message, history, rag_engine):
@@ -494,16 +554,41 @@ class WebLawChain:
         
         yield json.dumps({"type": "status", "message": "Đang tìm kiếm thông tin trên internet..."}, ensure_ascii=False) + "\n"
         
-        # Run search in thread pool
-        web_results = await asyncio.to_thread(self.web_engine.search, message, top_k=10)
-        logging.info(f'Web Results: {web_results[0].keys()}')
-        if not web_results:
+        # 1. Reflection: Generate search queries
+        queries, rerank_query = await reflect_query(self.llm_fast, message, history)
+        
+        # 2. Parallel Search
+        tasks = [
+            asyncio.to_thread(self.web_engine.search, q, top_k=5) 
+            for q in queries[:3] # Limit to 3 queries to save credits/time
+        ]
+        results_list = await asyncio.gather(*tasks)
+        
+        # 3. Deduplicate
+        unique_results = {}
+        for batch in results_list:
+            for res in batch:
+                if res['url'] not in unique_results:
+                    unique_results[res['url']] = res
+        
+        merged_results = list(unique_results.values())
+        logging.info(f'Web Results: {len(merged_results)} items')
+
+        if not merged_results:
             yield json.dumps({"type": "content", "delta": "Không tìm thấy thông tin trên internet."}, ensure_ascii=False) + "\n"
             return
+            
+        # 4. Rerank
+        # Use rag_engine.rerank if available (it handles list of dicts)
+        reranked_results = await asyncio.to_thread(
+            rag_engine.rerank, 
+            query=rerank_query, 
+            sources=merged_results, 
+            top_k=10
+        )
         
         # Return sources (only once)
-        yield json.dumps({"type": "sources", "data": web_results}, ensure_ascii=False) + "\n"
-        # logging.info(f'Web Results: {len(web_results)} items')
+        yield json.dumps({"type": "sources", "data": reranked_results}, ensure_ascii=False) + "\n"
         
         # Build chat history messages
         chat_history_msgs = []
@@ -515,12 +600,12 @@ class WebLawChain:
         
         # Answer with history context
         messages = [
-            SystemMessage(content=WEB_SEARCH_SYSTEM_PROMPT.format(web_results=json.dumps(web_results, ensure_ascii=False, indent=2)))
+            SystemMessage(content=WEB_SEARCH_SYSTEM_PROMPT.format(web_results=json.dumps(reranked_results, ensure_ascii=False, indent=2)))
         ] + chat_history_msgs + [
             HumanMessage(content=message)
         ]
         
-        async for chunk in stream_with_citations(self.llm, messages):
+        async for chunk in stream_with_citations(self.llm, messages, context_docs=reranked_results):
             yield chunk
 
 # 3. HybridChain (MỚI: Xử lý cả 2)
@@ -530,6 +615,10 @@ class HybridChain:
         self.llm = ChatOpenAI(
             base_url=BASE_URL, api_key=API_KEY, model=CHAT_MODEL,
             temperature=0.2, streaming=True
+        )
+        self.llm_fast = ChatOpenAI(
+            base_url=BASE_URL, api_key=API_KEY, model=CHAT_MODEL, 
+            temperature=0.0, max_tokens=1024 
         )
 
     async def chat(self, message, history, rag_engine):
@@ -544,10 +633,40 @@ class HybridChain:
         
         yield json.dumps({"type": "status", "message": "Đang đối chiếu dữ liệu hệ thống và internet..."}, ensure_ascii=False) + "\n"
         
-        # Parallel retrieval: RAG + Web
-        rag_task = asyncio.to_thread(rag_engine.retrieve, message, top_k=20)
-        web_task = asyncio.to_thread(self.web_engine.search, message, top_k=10)
-        rag_docs, web_docs = await asyncio.gather(rag_task, web_task)
+        # 1. Reflection
+        queries, rerank_query = await reflect_query(self.llm_fast, message, history)
+
+        # 2. Parallel retrieval: RAG + Web
+        # RAG Search (Multi-query)
+        rag_tasks = [
+            asyncio.to_thread(rag_engine.retrieve, q, top_k=10) 
+            for q in queries
+        ]
+        # Web Search (Limit queries)
+        web_tasks = [
+            asyncio.to_thread(self.web_engine.search, q, top_k=5)
+            for q in queries[:2]
+        ]
+        
+        all_results = await asyncio.gather(*(rag_tasks + web_tasks))
+        
+        rag_results_batches = all_results[:len(rag_tasks)]
+        web_results_batches = all_results[len(rag_tasks):]
+        
+        # Deduplicate RAG
+        unique_rag = {}
+        for batch in rag_results_batches:
+            for doc in batch:
+                unique_rag[doc['id']] = doc
+        
+        # Deduplicate Web
+        unique_web = {}
+        for batch in web_results_batches:
+            for doc in batch:
+                unique_web[doc['url']] = doc
+                
+        rag_docs = list(unique_rag.values())
+        web_docs = list(unique_web.values())
 
         # Label source types
         for d in rag_docs: d["source_type"] = "LAW_DB"
@@ -557,8 +676,8 @@ class HybridChain:
         all_docs = rag_docs + web_docs
         
         if all_docs:
-            # Rerank merged results to get most relevant
-            ranked_docs = await asyncio.to_thread(rag_engine.rerank, message, all_docs, top_k=15)
+            # Rerank merged results to get most relevant using user's initial query (or rerank_query)
+            ranked_docs = await asyncio.to_thread(rag_engine.rerank, rerank_query, all_docs, top_k=15)
             # Sort to prioritize LAW_DB within reranked results
             ranked_docs.sort(key=lambda x: (0 if x.get("source_type") == "LAW_DB" else 1, -x.get("rerank_score", 0)))
         else:
@@ -599,7 +718,7 @@ class HybridChain:
             HumanMessage(content=message)
         ]
 
-        async for chunk in stream_with_citations(self.llm, messages, rag_engine=rag_engine):
+        async for chunk in stream_with_citations(self.llm, messages, rag_engine=rag_engine, context_docs=ranked_docs):
             yield chunk
 
 class ChitChatChain:
