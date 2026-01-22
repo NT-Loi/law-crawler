@@ -268,6 +268,16 @@ uvicorn app:app --host 0.0.0.0 --port 8888 --reload
 
 API available at `http://localhost:8888`
 
+### Start Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+![Frontend](images/web.png)
+
 ### API Endpoints
 
 | Endpoint | Method | Description |
