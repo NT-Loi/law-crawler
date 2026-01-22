@@ -88,6 +88,7 @@ function App() {
     };
     setConversations(prev => [newConv, ...prev]);
     setActiveConversationId(newConv.id);
+    setActiveTab('chat'); // Switch to chat tab
   }, []);
 
   // Initialize with a conversation if none exists
@@ -123,6 +124,7 @@ function App() {
   // Select conversation
   const handleSelectConversation = useCallback((convId: string) => {
     setActiveConversationId(convId);
+    setActiveTab('chat'); // Switch to chat tab
   }, []);
 
   // Delete conversation

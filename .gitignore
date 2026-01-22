@@ -33,7 +33,7 @@ logs/
 
 # Data / Generated Files
 BoPhapDienDienTu.zip
-# data/
+data/
 qdrant_data/
 *.json
 *.html
